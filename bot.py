@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-# 🤖 ربات تلگرام چندمنظوره دانلود آهنگ، مداحی و فیلم/سریال
+# 🤖 ربات تلگرام چندمنظوره دانلود آهنگ، مداحی و فیلم/سریال (نسخه پایدار و ضد تداخل)
 
 import os
 import re
 import sys
 import time
+import json
 import uuid
 import shutil
 import tempfile
 import threading
 import subprocess
-from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urljoin, urlparse
@@ -34,7 +34,6 @@ MAX_FILE_MB = 48
 MAX_PARALLEL_DL = 4           
 SEARCH_TIMEOUT = 15           
 
-# بیش از ۱۰ منبع معتبر ایرانی و بین‌المللی
 SITES = [
     {"name": "UpMusics", "base": "https://upmusics.com"},
     {"name": "MusicDel", "base": "https://musicdel.ir"},
@@ -308,22 +307,34 @@ def download_media(url, workdir, video=False, quality=192):
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=8)
 DL_SEM = threading.Semaphore(MAX_PARALLEL_DL)
 
-CACHE = OrderedDict()
+# ───────────────────────── سیستم کش کاملاً پایدار روی دیسک ─────────────────────────
+CACHE_DIR = os.path.join(tempfile.gettempdir(), "bot_persistent_cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_LOCK = threading.Lock()
 
-
 def cache_put(data):
-    key = uuid.uuid4().hex[:8]
+    key = uuid.uuid4().hex[:12]
+    path = os.path.join(CACHE_DIR, f"{key}.json")
     with CACHE_LOCK:
-        CACHE[key] = data
-        if len(CACHE) > 1000:
-            CACHE.popitem(last=False)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception:
+            pass
     return key
 
-
 def cache_get(key):
+    if not key:
+        return None
+    path = os.path.join(CACHE_DIR, f"{key}.json")
     with CACHE_LOCK:
-        return CACHE.get(key)
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return None
 
 
 def safe_edit(text, chat_id, msg_id, kb=None):
@@ -420,7 +431,7 @@ def on_callback(c):
         d = cache_get(key)
         
         if not d:
-            bot.answer_callback_query(c.id, "درخواست منقضی شده؛ دوباره جستجو کنید.", show_alert=True)
+            bot.answer_callback_query(c.id, "اطلاعات این نتیجه منقضی شده؛ لطفاً مجدد جستجو کنید.", show_alert=True)
             return
             
         bot.answer_callback_query(c.id)
@@ -485,7 +496,7 @@ if __name__ == "__main__":
     log("🤖 Bot and Web Server are running...")
     try:
         bot.remove_webhook()
-        time.sleep(1)
+        time.sleep(2)
     except Exception:
         pass
     
