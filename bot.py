@@ -35,9 +35,7 @@ from requests.utils import requote_uri
 from telebot import types
 
 # ───────────────────────── تنظیمات ─────────────────────────
-TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-if not TOKEN:
-    sys.exit("BOT_TOKEN تنظیم نشده است. آن را در Environment سرویس Render اضافه کنید.")
+TOKEN = '9102489747:AAHVNVKCpSX_FJj596oWrT0uaobwRzM6pwo'
 
 ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
 PROXY_URL = os.environ.get("PROXY_URL", "").strip() or None
