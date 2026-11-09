@@ -227,16 +227,11 @@ def search_site(site, q):
 
 
 def search_media(q, mode="audio"):
-    """
-    mode='audio' -> حداقل ۳ تا ۵ لینک یوتیوب + سایت‌های ایرانی
-    mode='video' -> حداقل ۵ لینک ویدیویی از یوتیوب + منابع دیگر
-    """
     yt_count = 6 if mode == "video" else 4
     yt_results = search_ydl("ytsearch", "YouTube", q, yt_count)
     
     merged = list(yt_results)
     
-    # اگر بخش صوتی بود، سایت‌های ایرانی و ساندکلاود را هم اضافه کن
     if mode == "audio":
         jobs = [(s["name"], (lambda s=s: search_site(s, q))) for s in SITES]
         jobs.append(("SoundCloud", lambda: search_ydl("scsearch", "SoundCloud", q, 3)))
@@ -329,7 +324,7 @@ def send_media_file(chat_id, path, title, performer=None, video=False):
 
 
 # ───────────────────────── مدیریت پیام‌ها و دسته‌بندی‌ها ─────────────────────────
-USER_MODE = {}  # ذخیره حالت انتخاب شده کاربر (audio یا video)
+USER_MODE = {}
 
 @bot.message_handler(commands=["start", "help"])
 def on_start(m):
@@ -352,7 +347,7 @@ def set_mode(c):
     bot.answer_callback_query(c.id, f"حالت روی {'آهنگ و مداحی' if mode=='audio' else 'فیلم و سریال'} تنظیم شد.")
     mode_text = "🎵 آهنگ یا مداحی" if mode == 'audio' else "🎬 فیلم یا سریال"
     bot.edit_message_text(
-        f"شما بخش <b>{mode_text}</b> را انتخاب کردید.\n\nحاکمِ بی‌چون‌وچرا؛ اکنون نام خواننده، مداح یا فیلم مورد نظرتان را بفرستید:",
+        f"شما بخش <b>{mode_text}</b> را انتخاب کردید.\n\nاکنون نام خواننده، مداح یا فیلم مورد نظرتان را بفرستید:",
         c.message.chat.id,
         c.message.message_id
     )
@@ -364,7 +359,6 @@ def on_text(m):
     if not q or q.startswith("/"):
         return
     
-    # حالت پیش‌فرض صوتی اگر کاربر دکمه‌ای نزده باشد
     mode = USER_MODE.get(m.from_user.id, "audio")
     
     wait = bot.reply_to(m, f"🔎 در حال جستجوی حرفه‌ای در یوتیوب و ۱۰+ منبع برای «{q}» ...")
@@ -418,7 +412,6 @@ def on_callback(c):
             
             kb = types.InlineKeyboardMarkup()
             if mode == "audio":
-                # بازگرداندن کیفیت‌های ۱۲۸ و ۳۲۰ برای آهنگ و مداحی
                 kb.row(
                     types.InlineKeyboardButton("📥 کیفیت 128 kbps (صوتی)", callback_data=f"dl:128:{key}:{idx}"),
                     types.InlineKeyboardButton("🔥 کیفیت 320 kbps (صوتی)", callback_data=f"dl:320:{key}:{idx}")
@@ -471,6 +464,13 @@ if __name__ == "__main__":
     log("🤖 Bot and Web Server are running...")
     try:
         bot.remove_webhook()
+        time.sleep(1)
     except Exception:
         pass
-    bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
+    
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+        except Exception as e:
+            log(f"Polling error: {e}")
+            time.sleep(5)
