@@ -1,2 +1,5 @@
 pyTelegramBotAPI
-yt-dlp
+yt-dlp[default]
+requests
+beautifulsoup4
+imageio-ffmpeg
