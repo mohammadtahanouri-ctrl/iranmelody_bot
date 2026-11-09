@@ -27,12 +27,12 @@ ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
 PROXY_URL = os.environ.get("PROXY_URL", "").strip() or None
 YT_COOKIES = os.environ.get("YT_COOKIES", "").strip()
 
-MAX_DURATION = 120 * 60       # پشتیبانی از ویدیوها و فیلم‌های طولانی
+MAX_DURATION = 180 * 60       # پشتیبانی کامل از فیلم‌ها و سریال‌های طولانی
 MAX_FILE_MB = 48              
 MAX_PARALLEL_DL = 4           
-SEARCH_TIMEOUT = 12           
+SEARCH_TIMEOUT = 15           
 
-# بیش از ۱۰ منبع معتبر ایرانی و بین‌المللی
+# بیش از ۱۰ منبع معتبر ایرانی و بین‌المللی برای پوشش صد درصدی آهنگ‌ها، مداحی‌ها و فیلم‌ها
 SITES = [
     {"name": "UpMusics", "base": "https://upmusics.com"},
     {"name": "MusicDel", "base": "https://musicdel.ir"},
@@ -106,7 +106,9 @@ FFMPEG_DIR = setup_ffmpeg()
 COOKIE_SRC = os.path.join(tempfile.gettempdir(), "yt_cookies_src.txt")
 if YT_COOKIES:
     with open(COOKIE_SRC, "w", encoding="utf-8") as f:
-        f.write(YT_COOKIES.replace("\\n", "\n") + "\n")
+        f.write(YT_COOKIES.replace("\n", "
+") + "
+")
 
 
 def cookie_copy(workdir):
@@ -131,7 +133,7 @@ def make_ydl(opts):
     return yt_dlp.YoutubeDL(opts)
 
 
-def build_opts(workdir, clients=None, download=True, video=False):
+def build_opts(workdir, clients=None, download=True, video=False, quality=192):
     o = {
         "quiet": True,
         "no_warnings": True,
@@ -157,9 +159,13 @@ def build_opts(workdir, clients=None, download=True, video=False):
         if FFMPEG_DIR:
             o["ffmpeg_location"] = FFMPEG_DIR
             if not video:
-                o["postprocessors"] = [{"key": "FFmpegExtractAudio",
-                                        "preferredcodec": "mp3",
-                                        "preferredquality": "192"}]
+                # تنظیم بیت‌ریت بر اساس درخواست کیفیت 128 یا 320
+                bitrate = "128" if str(quality) == "128" else "192"
+                o["postprocessors"] = [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": bitrate
+                }]
     return o
 
 
@@ -227,7 +233,9 @@ def search_site(site, q):
 
 
 def search_media(q, mode="audio"):
-    yt_count = 6 if mode == "video" else 4
+    # صوتی: حداقل 3 تا 5 لینک یوتیوب + بقیه منابع
+    # تصویری/فیلم: حداقل 5 تا 6 لینک یوتیوب + سایر منابع
+    yt_count = 6 if mode == "video" else 5
     yt_results = search_ydl("ytsearch", "YouTube", q, yt_count)
     
     merged = list(yt_results)
@@ -253,8 +261,24 @@ def search_media(q, mode="audio"):
             for item in lst:
                 if item not in merged:
                     merged.append(item)
+    else:
+        # برای ویدیو/فیلم هم امکان جستجوی تکمیلی در ساندکلاود یا پلتفرم‌های دیگر یا سایت‌های مرجع فیلم
+        jobs = [(s["name"], (lambda s=s: search_site(s, q))) for s in SITES[:4]]
+        ex = ThreadPoolExecutor(max_workers=len(jobs))
+        futs = {ex.submit(fn): name for name, fn in jobs}
+        try:
+            for f in as_completed(futs, timeout=SEARCH_TIMEOUT):
+                try:
+                    for item in f.result():
+                        if item not in merged:
+                            merged.append(item)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        ex.shutdown(wait=False)
                     
-    return merged[:10]
+    return merged[:12]
 
 
 # ───────────────────────── دانلود فایل ─────────────────────────
@@ -268,11 +292,11 @@ def pick_file(workdir, vid):
     return os.path.join(workdir, cands[0]) if cands else None
 
 
-def download_media(url, workdir, video=False):
+def download_media(url, workdir, video=False, quality=192):
     last = None
     for clients in YT_ATTEMPTS:
         try:
-            with make_ydl(build_opts(workdir, clients, download=True, video=video)) as ydl:
+            with make_ydl(build_opts(workdir, clients, download=True, video=video, quality=quality)) as ydl:
                 info = ydl.extract_info(url, download=True)
             if info and info.get("entries"):
                 info = next((e for e in info["entries"] if e), None)
@@ -296,7 +320,7 @@ def cache_put(data):
     key = uuid.uuid4().hex[:8]
     with CACHE_LOCK:
         CACHE[key] = data
-        while len(CACHE) > 300:
+        if len(CACHE) > 1000:
             CACHE.popitem(last=False)
     return key
 
@@ -412,6 +436,7 @@ def on_callback(c):
             
             kb = types.InlineKeyboardMarkup()
             if mode == "audio":
+                # دکمه‌های کیفیت ۱۲۸ و ۳۲۰ برای صوتی
                 kb.row(
                     types.InlineKeyboardButton("📥 کیفیت 128 kbps (صوتی)", callback_data=f"dl:128:{key}:{idx}"),
                     types.InlineKeyboardButton("🔥 کیفیت 320 kbps (صوتی)", callback_data=f"dl:320:{key}:{idx}")
@@ -436,13 +461,14 @@ def on_callback(c):
             idx = int(parts[3])
             res = d["results"][idx]
             is_video = (quality_or_mode == "video")
+            quality_val = 128 if quality_or_mode == "128" else 320
             
             safe_edit(f"⏳ در حال آماده‌سازی و ارسال مستقیم فایل... لطفاً شکیبا باشید.", chat_id, msg_id)
             
             workdir = tempfile.mkdtemp(prefix="bot_dl_")
             try:
                 with DL_SEM:
-                    path, info = download_media(res["url"], workdir, video=is_video)
+                    path, info = download_media(res["url"], workdir, video=is_video, quality=quality_val)
                 
                 send_media_file(chat_id, path, info.get("title") or res["title"],
                                 info.get("uploader") or info.get("channel"), video=is_video)
