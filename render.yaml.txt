@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: iranmelody-bot
+    runtime: python
+    buildCommand: "apt-get update && apt-get install -y ffmpeg && pip install --upgrade pip && pip install -r requirements.txt && pip install --upgrade yt-dlp"
+    startCommand: "python bot.py"
