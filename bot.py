@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 🤖 ربات تلگرام حرفه‌ای و انقلابی دانلود آهنگ، مداحی و فیلم/سریال (نسخه نهایی با کش پایدار روی دیسک و ضد تایم‌اوت)
+# 🤖 ربات تلگرام انقلابی با پایگاه داده SQLite دائمی (بدون وابستگی به رم و بدون خطای انقضا)
 
 import os
 import re
@@ -7,6 +7,7 @@ import sys
 import time
 import json
 import uuid
+import sqlite3
 import shutil
 import tempfile
 import threading
@@ -21,19 +22,17 @@ from bs4 import BeautifulSoup
 from requests.utils import requote_uri
 from telebot import types
 
-# ───────────────────────── تنظیمات حیاتی ─────────────────────────
 TOKEN = '9102489747:AAHVNVKCpSX_FJj596oWrT0uaobwRzM6pwo'
 
 ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
 PROXY_URL = os.environ.get("PROXY_URL", "").strip() or None
 YT_COOKIES = os.environ.get("YT_COOKIES", "").strip()
 
-MAX_DURATION = 180 * 60       # پشتیبانی کامل از فیلم‌ها و سریال‌های طولانی
-MAX_FILE_MB = 48              
-MAX_PARALLEL_DL = 4           
-SEARCH_TIMEOUT = 15           
+MAX_DURATION = 180 * 60
+MAX_FILE_MB = 48
+MAX_PARALLEL_DL = 4
+SEARCH_TIMEOUT = 15
 
-# بیش از ۱۰ منبع معتبر ایرانی و بین‌المللی
 SITES = [
     {"name": "UpMusics", "base": "https://upmusics.com"},
     {"name": "MusicDel", "base": "https://musicdel.ir"},
@@ -53,32 +52,71 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": UA, "Accept-Language": "fa,en;q=0.8"})
 
-
 def log(*a):
     print(*a, flush=True)
 
+# پایگاه داده SQLite دائمی برای ذخیره نتایج و جلوگیری از هرگونه خطای انقضا
+DB_PATH = os.path.join(tempfile.gettempdir(), "bot_permanent_storage.db")
+DB_LOCK = threading.Lock()
 
-# ───────────────────────── وب‌سرور زنده‌نگه‌دار (Render Health Check) ─────────────────────────
+def init_db():
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                key TEXT PRIMARY KEY,
+                data TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+init_db()
+
+def db_put(data):
+    key = uuid.uuid4().hex[:10]
+    payload = json.dumps(data, ensure_ascii=False)
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO sessions (key, data) VALUES (?, ?)", (key, payload))
+        conn.commit()
+        conn.close()
+    return key
+
+def db_get(key):
+    if not key:
+        return None
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute("SELECT data FROM sessions WHERE key = ?", (key,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            try:
+                return json.loads(row[0])
+            except Exception:
+                pass
+    return None
+
+# وب‌سرور زنده‌نگه‌دار
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is alive and running!")
-
+        self.wfile.write(b"Bot is alive!")
     def do_HEAD(self):
         self.send_response(200)
         self.end_headers()
-
     def log_message(self, *args):
         pass
-
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), SimpleHandler).serve_forever()
 
-
-# ───────────────────────── تنظیمات FFMPEG و کوکی ─────────────────────────
 def setup_ffmpeg():
     exe = None
     try:
@@ -101,14 +139,11 @@ def setup_ffmpeg():
             os.chmod(link, 0o755)
     return d
 
-
 FFMPEG_DIR = setup_ffmpeg()
-
 COOKIE_SRC = os.path.join(tempfile.gettempdir(), "yt_cookies_src.txt")
 if YT_COOKIES:
     with open(COOKIE_SRC, "w", encoding="utf-8") as f:
         f.write(YT_COOKIES.replace("\\n", "\n") + "\n")
-
 
 def cookie_copy(workdir):
     if not os.path.exists(COOKIE_SRC):
@@ -116,7 +151,6 @@ def cookie_copy(workdir):
     dst = os.path.join(workdir, "cookies.txt")
     shutil.copy(COOKIE_SRC, dst)
     return dst
-
 
 def make_ydl(opts):
     rt = {}
@@ -130,7 +164,6 @@ def make_ydl(opts):
         except Exception:
             pass
     return yt_dlp.YoutubeDL(opts)
-
 
 def build_opts(workdir, clients=None, download=True, video=False, quality=192):
     o = {
@@ -166,15 +199,11 @@ def build_opts(workdir, clients=None, download=True, video=False, quality=192):
                 }]
     return o
 
-
-# ───────────────────────── موتور جستجوی هوشمند ─────────────────────────
 def clean_title(t):
     t = re.sub(r"\s+", " ", t or "").strip()
     return re.sub(r"^دانلود\s+", "", t)
 
-
 SKIP_PATH = ("/category/", "/tag/", "/page/", "/author/", "/feed", "/wp-", "/tags", "/cat/")
-
 
 def search_ydl(prefix, label, q, n=5):
     opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist",
@@ -200,7 +229,6 @@ def search_ydl(prefix, label, q, n=5):
         return out
     except Exception:
         return []
-
 
 def search_site(site, q):
     base = site["base"]
@@ -229,17 +257,14 @@ def search_site(site, q):
     except Exception:
         return []
 
-
 def search_media(q, mode="audio"):
     yt_count = 6 if mode == "video" else 5
     yt_results = search_ydl("ytsearch", "YouTube", q, yt_count)
-    
     merged = list(yt_results)
     
     if mode == "audio":
         jobs = [(s["name"], (lambda s=s: search_site(s, q))) for s in SITES]
         jobs.append(("SoundCloud", lambda: search_ydl("scsearch", "SoundCloud", q, 3)))
-        
         ex = ThreadPoolExecutor(max_workers=len(jobs))
         futs = {ex.submit(fn): name for name, fn in jobs}
         got = {}
@@ -252,7 +277,6 @@ def search_media(q, mode="audio"):
         except Exception:
             pass
         ex.shutdown(wait=False)
-
         for name, lst in got.items():
             for item in lst:
                 if item not in merged:
@@ -272,11 +296,8 @@ def search_media(q, mode="audio"):
         except Exception:
             pass
         ex.shutdown(wait=False)
-                    
     return merged[:12]
 
-
-# ───────────────────────── دانلود فایل ─────────────────────────
 def pick_file(workdir, vid):
     cands = [f for f in os.listdir(workdir)
              if f.startswith(f"{vid}.") and not f.endswith((".part", ".ytdl", ".json"))]
@@ -285,7 +306,6 @@ def pick_file(workdir, vid):
             if f.endswith(ext):
                 return os.path.join(workdir, f)
     return os.path.join(workdir, cands[0]) if cands else None
-
 
 def download_media(url, workdir, video=False, quality=192):
     last = None
@@ -303,39 +323,8 @@ def download_media(url, workdir, video=False, quality=192):
             last = e
     raise last
 
-
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=8)
 DL_SEM = threading.Semaphore(MAX_PARALLEL_DL)
-
-# ───────────────────────── سیستم کش پایدار روی دیسک (ضد انقضا و ضد ری‌استارت) ─────────────────────────
-CACHE_DIR = os.path.join(tempfile.gettempdir(), "bot_revolutionary_cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
-CACHE_LOCK = threading.Lock()
-
-def cache_put(data):
-    key = uuid.uuid4().hex[:12]
-    path = os.path.join(CACHE_DIR, f"{key}.json")
-    with CACHE_LOCK:
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
-        except Exception:
-            pass
-    return key
-
-def cache_get(key):
-    if not key:
-        return None
-    path = os.path.join(CACHE_DIR, f"{key}.json")
-    with CACHE_LOCK:
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-    return None
-
 
 def safe_edit(text, chat_id, msg_id, kb=None):
     try:
@@ -343,7 +332,6 @@ def safe_edit(text, chat_id, msg_id, kb=None):
         return True
     except Exception:
         return False
-
 
 def send_media_file(chat_id, path, title, performer=None, video=False):
     with open(path, "rb") as f:
@@ -353,8 +341,6 @@ def send_media_file(chat_id, path, title, performer=None, video=False):
             bot.send_audio(chat_id, f, title=(title or "")[:64],
                            performer=(performer or "")[:64] or None, timeout=180)
 
-
-# ───────────────────────── مدیریت پیام‌ها و دسته‌بندی‌ها ─────────────────────────
 USER_MODE = {}
 
 @bot.message_handler(commands=["start", "help"])
@@ -364,53 +350,41 @@ def on_start(m):
         types.InlineKeyboardButton("🎵 آهنگ / مداحی", callback_data="mode:audio"),
         types.InlineKeyboardButton("🎬 فیلم / سریال", callback_data="mode:video")
     )
-    bot.send_message(
-        m.chat.id, 
-        "سلام! خوش آمدید. لطفاً مشخص کنید چه نوع فایلی را می‌خواهید جستجو کنید:", 
-        reply_markup=kb
-    )
-
+    bot.send_message(m.chat.id, "سلام! خوش آمدید. لطفاً مشخص کنید چه نوع فایلی را می‌خواهید جستجو کنید:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("mode:"))
 def set_mode(c):
     mode = c.data.split(":")[1]
     USER_MODE[c.from_user.id] = mode
     try:
-        bot.answer_callback_query(c.id, f"حالت روی {'آهنگ و مداحی' if mode=='audio' else 'فیلم و سریال'} تنظیم شد.")
+        bot.answer_callback_query(c.id)
     except Exception:
         pass
     mode_text = "🎵 آهنگ یا مداحی" if mode == 'audio' else "🎬 فیلم یا سریال"
     bot.edit_message_text(
         f"شما بخش <b>{mode_text}</b> را انتخاب کردید.\n\nاکنون نام خواننده، مداح یا فیلم مورد نظرتان را بفرستید:",
-        c.message.chat.id,
-        c.message.message_id
+        c.message.chat.id, c.message.message_id
     )
-
 
 @bot.message_handler(content_types=["text"])
 def on_text(m):
     q = (m.text or "").strip()
     if not q or q.startswith("/"):
         return
-    
     mode = USER_MODE.get(m.from_user.id, "audio")
-    
     wait = bot.reply_to(m, f"🔎 در حال جستجوی حرفه‌ای در یوتیوب و ۱۰+ منبع برای «{q}» ...")
     results = search_media(q, mode=mode)
-    
     if not results:
         safe_edit("نتیجه‌ای پیدا نشد. لطفاً نام دقیق‌تر یا کوتاه‌تری بفرستید.", m.chat.id, wait.message_id)
         return
     
-    sid = cache_put({"results": results, "q": q, "mode": mode})
+    sid = db_put({"results": results, "q": q, "mode": mode})
     kb = types.InlineKeyboardMarkup()
     for i, r in enumerate(results):
         icon = "▶️" if r["src"] == "YouTube" else "🎵"
         kb.add(types.InlineKeyboardButton(f"{icon} {r['title'][:45]} ({r['src']})", callback_data=f"sel:{sid}:{i}"))
-    
     kb.add(types.InlineKeyboardButton("🔄 تغییر دسته‌بندی (آهنگ / فیلم)", callback_data="reset_menu"))
     safe_edit(f"نتایج یافت شده برای «{q}» ({'صوتی' if mode=='audio' else 'تصویری'}):", m.chat.id, wait.message_id, kb)
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "reset_menu")
 def reset_menu_cb(c):
@@ -425,33 +399,29 @@ def reset_menu_cb(c):
     )
     safe_edit("لطفاً دسته‌بندی جدید را انتخاب کنید:", c.message.chat.id, c.message.message_id, kb)
 
-
 @bot.callback_query_handler(func=lambda c: bool(c.data))
 def on_callback(c):
     try:
         if c.data.startswith("mode:"):
             return set_mode(c)
-            
         parts = c.data.split(":")
         kind, key = parts[0], parts[1]
         chat_id, msg_id = c.message.chat.id, c.message.message_id
         
-        # فوراً به تلگرام پاسخ می‌دهیم تا خطای تایم‌اوت و انقضا رخ ندهد
         try:
             bot.answer_callback_query(c.id, "درخواست شما دریافت شد...")
         except Exception:
             pass
             
-        d = cache_get(key)
+        d = db_get(key)
         if not d:
-            safe_edit("⚠️ اطلاعات این درخواست منقضی شده یا ربات ری‌استارت شده است. لطفاً عبارت خود را مجدداً جستجو کنید.", chat_id, msg_id)
+            safe_edit("⚠️ اطلاعات این جستجو منقضی شده است. لطفاً عبارت خود را مجدداً جستجو کنید.", chat_id, msg_id)
             return
         
         if kind == "sel":
             idx = int(parts[2])
             res = d["results"][idx]
             mode = d.get("mode", "audio")
-            
             kb = types.InlineKeyboardMarkup()
             if mode == "audio":
                 kb.row(
@@ -483,13 +453,11 @@ def on_callback(c):
             
             safe_edit(f"⏳ در حال آماده‌سازی و ارسال مستقیم فایل... لطفاً شکیبا باشید.", chat_id, msg_id)
             
-            # اجرای دانلود در ترد پس‌زمینه برای جلوگیری از انسداد ربات
             def background_download():
                 workdir = tempfile.mkdtemp(prefix="bot_dl_")
                 try:
                     with DL_SEM:
                         path, info = download_media(res["url"], workdir, video=is_video, quality=quality_val)
-                    
                     send_media_file(chat_id, path, info.get("title") or res["title"],
                                     info.get("uploader") or info.get("channel"), video=is_video)
                     try:
@@ -503,18 +471,16 @@ def on_callback(c):
                     safe_edit("❌ متأسفانه دریافت مستقیم این فایل با محدودیت مواجه شد. از لینک زیر استفاده کنید:", chat_id, msg_id, kb)
                 finally:
                     shutil.rmtree(workdir, ignore_errors=True)
-
-        # اگر درخواست دانلود بود، آن را به پس‌زمینه می‌سپاریم
+            
             if kind == "dl":
                 threading.Thread(target=background_download, daemon=True).start()
                 
     except Exception as e:
         log("callback exception:", e)
 
-
 if __name__ == "__main__":
     threading.Thread(target=run_web_server, daemon=True).start()
-    log("🤖 Bot and Web Server are running...")
+    log("🤖 Bot and Web Server are running with SQLite backend...")
     try:
         bot.remove_webhook()
         time.sleep(2)
