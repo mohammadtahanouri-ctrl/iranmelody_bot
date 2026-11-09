@@ -27,18 +27,24 @@ ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
 PROXY_URL = os.environ.get("PROXY_URL", "").strip() or None
 YT_COOKIES = os.environ.get("YT_COOKIES", "").strip()
 
-MAX_DURATION = 25 * 60        
+MAX_DURATION = 45 * 60        # پشتیبانی از فایل‌های طولانی (مداحی و فیلم)
 MAX_FILE_MB = 48              
-MAX_PARALLEL_DL = 3           
+MAX_PARALLEL_DL = 4           
 SEARCH_TIMEOUT = 12           
-MAX_RESULTS = 9
+MAX_RESULTS = 10
 
+# بیش از ۱۰ منبع معتبر ایرانی و بین‌المللی برای پوشش صد درصدی آهنگ‌ها، مداحی‌ها و ویدیوها
 SITES = [
     {"name": "UpMusics", "base": "https://upmusics.com"},
     {"name": "MusicDel", "base": "https://musicdel.ir"},
     {"name": "Musics-Fa", "base": "https://musics-fa.com"},
-    {"name": "Nex1Music", "base": "https://nex1music.ir"},
-    {"name": "TehranMusic", "base": "https://tehranmusic.com"},
+    {"name": "TehranMusic", "base": "https://mytehranmusic.com"},
+    {"name": "Nex1Music", "base": "https://nex1music.com"},
+    {"name": "Download1Music", "base": "https://download1music.ir"},
+    {"name": "Bia2Music", "base": "https://bia2music.org"},
+    {"name": "Ganja2Music", "base": "https://ganja2music.com"},
+    {"name": "MelodyFa", "base": "https://melodyfa.com"},
+    {"name": "PopMusic", "base": "https://pop-music.ir"},
 ]
 
 YT_ATTEMPTS = [None, ["tv"], ["web_embedded"], ["mweb"], ["ios"]]
@@ -74,7 +80,7 @@ def run_web_server():
     HTTPServer(("0.0.0.0", port), SimpleHandler).serve_forever()
 
 
-# ───────────────────────── ffmpeg / کوکی ─────────────────────────
+# ───────────────────────── ابزارها و FFMPEG ─────────────────────────
 def setup_ffmpeg():
     exe = None
     try:
@@ -128,13 +134,13 @@ def make_ydl(opts):
     return yt_dlp.YoutubeDL(opts)
 
 
-def build_opts(workdir, clients=None, download=True):
+def build_opts(workdir, clients=None, download=True, video=False):
     o = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "socket_timeout": 15,
-        "retries": 1,
+        "retries": 2,
         "geo_bypass": True,
     }
     if PROXY_URL:
@@ -145,18 +151,23 @@ def build_opts(workdir, clients=None, download=True):
     if clients:
         o["extractor_args"] = {"youtube": {"player_client": clients}}
     if download:
-        o["format"] = "bestaudio/best" if FFMPEG_DIR else "bestaudio[ext=m4a]/bestaudio"
+        if video:
+            o["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+        else:
+            o["format"] = "bestaudio/best"
+        
         o["outtmpl"] = os.path.join(workdir, "%(id)s.%(ext)s")
         o["max_filesize"] = MAX_FILE_MB * 1024 * 1024
         if FFMPEG_DIR:
             o["ffmpeg_location"] = FFMPEG_DIR
-            o["postprocessors"] = [{"key": "FFmpegExtractAudio",
-                                    "preferredcodec": "mp3",
-                                    "preferredquality": "192"}]
+            if not video:
+                o["postprocessors"] = [{"key": "FFmpegExtractAudio",
+                                        "preferredcodec": "mp3",
+                                        "preferredquality": "192"}]
     return o
 
 
-# ───────────────────────── جستجوی سریع ─────────────────────────
+# ───────────────────────── موتور جستجوی هوشمند چندمنبعی ─────────────────────────
 def clean_title(t):
     t = re.sub(r"\s+", " ", t or "").strip()
     return re.sub(r"^دانلود\s+", "", t)
@@ -165,10 +176,36 @@ def clean_title(t):
 SKIP_PATH = ("/category/", "/tag/", "/page/", "/author/", "/feed", "/wp-", "/tags", "/cat/")
 
 
+def search_ydl(prefix, label, q, n=4):
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist",
+            "skip_download": True, "socket_timeout": 8}
+    if PROXY_URL:
+        opts["proxy"] = PROXY_URL
+    try:
+        with make_ydl(opts) as ydl:
+            info = ydl.extract_info(f"{prefix}{n}:{q}", download=False)
+        out = []
+        for e in (info or {}).get("entries") or []:
+            if not e:
+                continue
+            dur = e.get("duration")
+            if dur and dur > MAX_DURATION:
+                continue
+            url = e.get("url") or e.get("webpage_url")
+            if label == "YouTube" and e.get("id"):
+                url = f"https://www.youtube.com/watch?v={e['id']}"
+            if not url or not e.get("title"):
+                continue
+            out.append({"kind": "ydl", "src": label, "title": clean_title(e["title"]), "url": url})
+        return out
+    except Exception:
+        return []
+
+
 def search_site(site, q):
     base = site["base"]
     try:
-        r = HTTP.get(base + "/", params={"s": q}, timeout=8)
+        r = HTTP.get(base + "/", params={"s": q}, timeout=6)
         if r.status_code != 200:
             return []
         soup = BeautifulSoup(r.text, "html.parser")
@@ -193,36 +230,11 @@ def search_site(site, q):
         return []
 
 
-def search_ydl(prefix, label, q, n=3):
-    opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist",
-            "skip_download": True, "socket_timeout": 8}
-    if PROXY_URL:
-        opts["proxy"] = PROXY_URL
-    try:
-        with make_ydl(opts) as ydl:
-            info = ydl.extract_info(f"{prefix}{n}:{q}", download=False)
-        out = []
-        for e in (info or {}).get("entries") or []:
-            if not e:
-                continue
-            dur = e.get("duration")
-            if dur and dur > MAX_DURATION:
-                continue
-            url = e.get("url") or e.get("webpage_url")
-            if label == "YouTube" and e.get("id"):
-                url = f"https://www.youtube.com/watch?v={e['id']}"
-            if not url or not e.get("title"):
-                continue
-            out.append({"kind": "ydl", "src": label, "title": clean_title(e["title"]), "url": url})
-        return out[:2]
-    except Exception:
-        return []
-
-
 def search_all(q):
+    # ترکیب جستجوی هم‌زمان در یوتیوب، ساندکلاود و تمامی ۱۰+ سایت بزرگ موزیک
     jobs = [(s["name"], (lambda s=s: search_site(s, q))) for s in SITES]
-    jobs.append(("YouTube", lambda: search_ydl("ytsearch", "YouTube", q)))
-    jobs.append(("SoundCloud", lambda: search_ydl("scsearch", "SoundCloud", q)))
+    jobs.append(("YouTube", lambda: search_ydl("ytsearch", "YouTube", q, 5)))
+    jobs.append(("SoundCloud", lambda: search_ydl("scsearch", "SoundCloud", q, 3)))
     
     ex = ThreadPoolExecutor(max_workers=len(jobs))
     futs = {ex.submit(fn): name for name, fn in jobs}
@@ -237,25 +249,25 @@ def search_all(q):
         pass
     ex.shutdown(wait=False)
 
-    order = [s["name"] for s in SITES] + ["YouTube", "SoundCloud"]
     merged = []
-    for rnd in range(3):
-        for name in order:
-            lst = got.get(name, [])
-            if len(lst) > rnd and len(merged) < MAX_RESULTS:
-                merged.append(lst[rnd])
+    # اولویت دادن به نتایج یوتیوب و سایت‌های اصلی
+    for name in ["YouTube"] + [s["name"] for s in SITES] + ["SoundCloud"]:
+        lst = got.get(name, [])
+        for item in lst:
+            if item not in merged and len(merged) < MAX_RESULTS:
+                merged.append(item)
     return merged
 
 
-# ───────────────────────── استخراج و تضمین لینک مستقیم ─────────────────────────
+# ───────────────────────── استخراج و دانلود مستقیم فایل ─────────────────────────
 MP3_RE = re.compile(r"\.mp3(\?|$)", re.I)
 PREVIEW_RE = re.compile(r"preview|sample|demo|snippet|teaser", re.I)
 
 
-def fetch_site_links(page_url, title="آهنگ"):
+def fetch_site_links(page_url):
     links = []
     try:
-        r = HTTP.get(page_url, timeout=12)
+        r = HTTP.get(page_url, timeout=10)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, "html.parser")
             seen = set()
@@ -264,83 +276,49 @@ def fetch_site_links(page_url, title="آهنگ"):
                 if not href.startswith("http") or href in seen or PREVIEW_RE.search(href):
                     return
                 seen.add(href)
-                links.append({"q": quality_of(href + " " + text), "url": href})
+                m = re.search(r"(?<!\d)(320|128)(?!\d)", href + " " + text)
+                q = m.group(1) if m else "128"
+                links.append({"q": q, "url": href})
 
             for a in soup.find_all("a", href=True):
                 href, text = a["href"], a.get_text(" ", strip=True)
-                if MP3_RE.search(href):
-                    add(href, text)
-                elif re.search(r"320|128", text) and re.search(r"دانلود|download|کیفیت", text, re.I):
+                if MP3_RE.search(href) or re.search(r"320|128", text):
                     add(href, text)
             links.sort(key=lambda l: -(int(l["q"]) if l["q"] else 0))
     except Exception:
         pass
-
     if not links:
         links.append({"q": "320", "url": page_url})
-        links.append({"q": "128", "url": page_url})
-    return links[:6]
+    return links[:4]
 
 
-def quality_of(s):
-    m = re.search(r"(?<!\d)(320|256|192|128|64)(?!\d)", s)
-    return m.group(1) if m else "128"
-
-
-def http_download(url, referer, workdir):
-    path = os.path.join(workdir, "track.mp3")
-    total = 0
-    with HTTP.get(url, headers={"Referer": referer}, stream=True, timeout=25) as r:
-        r.raise_for_status()
-        if "text/html" in r.headers.get("Content-Type", ""):
-            raise RuntimeError("لینک مستقیم معتبر نبود")
-        with open(path, "wb") as f:
-            for chunk in r.iter_content(256 * 1024):
-                total += len(chunk)
-                if total > MAX_FILE_MB * 1024 * 1024:
-                    raise RuntimeError("حجم فایل بیشتر از حد مجاز است")
-                f.write(chunk)
-    return path
-
-
-# ───────────────────────── دانلود yt-dlp ─────────────────────────
 def pick_file(workdir, vid):
     cands = [f for f in os.listdir(workdir)
              if f.startswith(f"{vid}.") and not f.endswith((".part", ".ytdl", ".json"))]
-    for ext in (".mp3", ".m4a"):
+    for ext in (".mp3", ".m4a", ".mp4", ".webm"):
         for f in cands:
             if f.endswith(ext):
                 return os.path.join(workdir, f)
     return os.path.join(workdir, cands[0]) if cands else None
 
 
-def download_audio(url, workdir, youtube=True):
+def download_media(url, workdir, video=False):
     last = None
-    for clients in (YT_ATTEMPTS if youtube else [None]):
+    for clients in YT_ATTEMPTS:
         try:
-            with make_ydl(build_opts(workdir, clients)) as ydl:
+            with make_ydl(build_opts(workdir, clients, download=True, video=video)) as ydl:
                 info = ydl.extract_info(url, download=True)
             if info and info.get("entries"):
                 info = next((e for e in info["entries"] if e), None)
             path = pick_file(workdir, info.get("id")) if info else None
             if path:
                 return path, info
-            last = RuntimeError("فایل صوتی ایجاد نشد")
+            last = RuntimeError("فایل ساخته نشد")
         except Exception as e:
             last = e
     raise last
 
 
-def fetch_audio(res, workdir):
-    try:
-        return download_audio(res["url"], workdir, youtube=(res["src"] == "YouTube"))
-    except Exception as e:
-        if res["src"] == "YouTube":
-            return download_audio(f"scsearch1:{res['title']}", workdir, youtube=False)
-        raise e
-
-
-# ───────────────────────── ربات و کنترل پیام‌ها ─────────────────────────
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=8)
 DL_SEM = threading.Semaphore(MAX_PARALLEL_DL)
 
@@ -370,33 +348,18 @@ def safe_edit(text, chat_id, msg_id, kb=None):
         return False
 
 
-ICON = {"YouTube": "▶️", "SoundCloud": "☁️"}
-
-
-def results_keyboard(sid):
-    kb = types.InlineKeyboardMarkup()
-    for i, r in enumerate(cache_get(sid)["results"]):
-        label = f"{ICON.get(r['src'], '🎵')} {r['title'][:45]} · {r['src']}"
-        kb.add(types.InlineKeyboardButton(label, callback_data=f"r:{sid}:{i}"))
-    return kb
-
-
-def show_results(chat_id, msg_id, sid, header):
-    safe_edit(header, chat_id, msg_id, results_keyboard(sid))
-
-
-def send_file(chat_id, path, title, performer=None):
+def send_media_file(chat_id, path, title, performer=None, video=False):
     with open(path, "rb") as f:
-        if path.lower().endswith((".mp3", ".m4a")):
-            bot.send_audio(chat_id, f, title=(title or "")[:64],
-                           performer=(performer or "")[:64] or None, timeout=120)
+        if video:
+            bot.send_video(chat_id, f, caption=(title or "")[:200], timeout=180)
         else:
-            bot.send_document(chat_id, f, caption=(title or "")[:200], timeout=120)
+            bot.send_audio(chat_id, f, title=(title or "")[:64],
+                           performer=(performer or "")[:64] or None, timeout=180)
 
 
 @bot.message_handler(commands=["start", "help"])
 def on_start(m):
-    bot.reply_to(m, "سلام! نام خواننده یا آهنگ مورد نظرتان را بفرستید تا به سرعت جستجو و ارسال کنم.")
+    bot.reply_to(m, "سلام! نام آهنگ، مداحی یا فیلم مورد نظرتان را بفرستید تا از میان بیش از ۱۰ منبع معتبر جستجو شده و فایل مستقیم آن برایتان ارسال شود.")
 
 
 @bot.message_handler(content_types=["text"])
@@ -404,93 +367,87 @@ def on_text(m):
     q = (m.text or "").strip()
     if not q or q.startswith("/"):
         return
-    wait = bot.reply_to(m, f"🔎 در حال جستجوی سریع «{q}» ...")
+    wait = bot.reply_to(m, f"🔎 در حال جستجو در ۱۰+ منبع برای «{q}» ...")
     results = search_all(q)
     if not results:
         safe_edit("نتیجه‌ای پیدا نشد. لطفاً عبارت کوتاه‌تری بفرستید.", m.chat.id, wait.message_id)
         return
+    
     sid = cache_put({"results": results, "q": q})
-    show_results(m.chat.id, wait.message_id, sid, f"نتایج «{q}» — یکی را انتخاب کنید:")
-
-
-def handle_site_pick(chat_id, msg_id, sid, res):
-    safe_edit(f"⏳ دریافت لینک‌های «{res['title'][:50]}» ...", chat_id, msg_id)
-    links = fetch_site_links(res["url"], res["title"])
-    
-    back = types.InlineKeyboardButton("🔙 بازگشت به نتایج", callback_data=f"b:{sid}")
     kb = types.InlineKeyboardMarkup()
+    for i, r in enumerate(results):
+        icon = "▶️" if r["src"] == "YouTube" else "🎵"
+        kb.add(types.InlineKeyboardButton(f"{icon} {r['title'][:45]} ({r['src']})", callback_data=f"sel:{sid}:{i}"))
     
-    lid = cache_put({"title": res["title"], "page": res["url"], "links": links})
-    for i, l in enumerate(links):
-        lab = f"{l['q']}kbps" if l["q"] else "MP3"
-        kb.row(
-            types.InlineKeyboardButton(f"⬇️ لینک {lab}", url=l["url"]),
-            types.InlineKeyboardButton(f"📤 ارسال {lab} در چت", callback_data=f"s:{lid}:{i}")
-        )
-    kb.add(back)
-    header = f"🎵 {res['title'][:100]}\nمنبع: {res['src']}"
-    safe_edit(header, chat_id, msg_id, kb)
-
-
-def handle_ydl_pick(chat_id, msg_id, sid, res):
-    safe_edit(f"⏳ آماده‌سازی «{res['title'][:50]}» ...", chat_id, msg_id)
-    workdir = tempfile.mkdtemp(prefix="bot_")
-    try:
-        with DL_SEM:
-            path, info = fetch_audio(res, workdir)
-        send_file(chat_id, path, info.get("title") or res["title"],
-                  info.get("uploader") or info.get("channel"))
-        show_results(chat_id, msg_id, sid, "✅ ارسال شد. انتخاب بعدی:")
-    except Exception as e:
-        back = types.InlineKeyboardButton("🔙 بازگشت به نتایج", callback_data=f"b:{sid}")
-        kb = types.InlineKeyboardMarkup()
-        kb.row(types.InlineKeyboardButton("🔗 باز کردن لینک مستقیم منبع", url=res["url"]))
-        kb.add(back)
-        safe_edit(f"⚠️ امکان ارسال مستقیم فایل صوتی این گزینه نبود.\nمی‌توانید از لینک مستقیم زیر استفاده کنید:", chat_id, msg_id, kb)
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
-
-
-def handle_send(chat_id, lid, i):
-    d = cache_get(lid)
-    if not d:
-        bot.send_message(chat_id, "درخواست منقضی شده؛ دوباره جستجو کنید.")
-        return
-    link = d["links"][i]
-    status = bot.send_message(chat_id, "⏳ در حال دریافت و ارسال فایل در چت ...")
-    workdir = tempfile.mkdtemp(prefix="bot_")
-    try:
-        with DL_SEM:
-            path = http_download(link["url"], d["page"], workdir)
-        send_file(chat_id, path, d["title"])
-        bot.delete_message(chat_id, status.message_id)
-    except Exception as e:
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("📥 دانلود مستقیم از مرورگر", url=link["url"]))
-        safe_edit("❌ امکان دانلود مستقیم فایل در سرور وجود نداشت، اما می‌توانید از لینک زیر مستقیماً دانلود کنید:", chat_id, status.message_id, kb)
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    safe_edit(f"نتایج یافت شده برای «{q}» — گزینه مورد نظر را انتخاب کنید:", m.chat.id, wait.message_id, kb)
 
 
 @bot.callback_query_handler(func=lambda c: bool(c.data))
 def on_callback(c):
     try:
-        kind, key, *rest = c.data.split(":")
+        parts = c.data.split(":")
+        kind, key = parts[0], parts[1]
         chat_id, msg_id = c.message.chat.id, c.message.message_id
         d = cache_get(key)
+        
         if not d:
-            bot.answer_callback_query(c.id, "نتایج منقضی شده؛ دوباره جستجو کنید.", show_alert=True)
+            bot.answer_callback_query(c.id, "درخواست منقضی شده؛ دوباره جستجو کنید.", show_alert=True)
             return
+            
         bot.answer_callback_query(c.id)
-        if kind == "b":
-            show_results(chat_id, msg_id, key, f"نتایج «{d['q']}» — یکی را انتخاب کنید:")
-        elif kind == "r":
-            res = d["results"][int(rest[0])]
-            (handle_site_pick if res["kind"] == "site" else handle_ydl_pick)(chat_id, msg_id, key, res)
-        elif kind == "s":
-            handle_send(chat_id, key, int(rest[0]))
-    except Exception:
-        pass
+        
+        if kind == "sel":
+            idx = int(parts[2])
+            res = d["results"][idx]
+            
+            kb = types.InlineKeyboardMarkup()
+            kb.row(
+                types.InlineKeyboardButton("🎧 دانلود مستقیم صوتی (MP3)", callback_data=f"dl:audio:{key}:{idx}"),
+                types.InlineKeyboardButton("🎬 دانلود مستقیم تصویری (MP4)", callback_data=f"dl:video:{key}:{idx}")
+            )
+            kb.add(types.InlineKeyboardButton("🔙 بازگشت به لیست نتایج", callback_data=f"back:{key}"))
+            safe_edit(f"📥 گزینه انتخابی:\n<b>{res['title']}</b>\n\nفرمت دلخواه را انتخاب کنید تا مستقیماً دریافت کنید:", chat_id, msg_id, kb)
+            
+        elif kind == "back":
+            results = d["results"]
+            kb = types.InlineKeyboardMarkup()
+            for i, r in enumerate(results):
+                icon = "▶️" if r["src"] == "YouTube" else "🎵"
+                kb.add(types.InlineKeyboardButton(f"{icon} {r['title'][:45]} ({r['src']})", callback_data=f"sel:{key}:{i}"))
+            safe_edit(f"نتایج جستجو — یکی را انتخاب کنید:", chat_id, msg_id, kb)
+            
+        elif kind == "dl":
+            mode = parts[2]
+            idx = int(parts[3])
+            res = d["results"][idx]
+            is_video = (mode == "video")
+            
+            safe_edit(f"⏳ در حال آماده‌سازی و ارسال مستقیم فایل {'ویدیو' if is_video else 'صوتی'}... لطفاً شکیبا باشید.", chat_id, msg_id)
+            
+            workdir = tempfile.mkdtemp(prefix="bot_dl_")
+            try:
+                with DL_SEM:
+                    if res["kind"] == "ydl" or res["src"] == "YouTube" or res["src"] == "SoundCloud":
+                        path, info = download_media(res["url"], workdir, video=is_video)
+                    else:
+                        # اگر از سایت‌های وبلاگی بود، لینک‌های داخل صفحه را استخراج می‌کنیم
+                        links = fetch_site_links(res["url"])
+                        target_url = links[0]["url"] if links else res["url"]
+                        path, info = download_media(target_url, workdir, video=is_video)
+                
+                send_media_file(chat_id, path, info.get("title") or res["title"],
+                                info.get("uploader") or info.get("channel"), video=is_video)
+                bot.delete_message(chat_id, msg_id)
+            except Exception as e:
+                log("Download error:", e)
+                kb = types.InlineKeyboardMarkup()
+                kb.add(types.InlineKeyboardButton("🔗 باز کردن لینک منبع", url=res["url"]))
+                safe_edit("❌ متأسفانه دریافت مستقیم این فایل با محدودیت مواجه شد. از لینک زیر استفاده کنید:", chat_id, msg_id, kb)
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
+                
+    except Exception as e:
+        log("callback exception:", e)
 
 
 if __name__ == "__main__":
