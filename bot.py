@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 🤖 ربات تلگرام چندمنظوره دانلود آهنگ، مداحی و فیلم/سریال (نسخه پایدار و ضد تداخل)
+# 🤖 ربات تلگرام حرفه‌ای و انقلابی دانلود آهنگ، مداحی و فیلم/سریال (نسخه نهایی با کش پایدار روی دیسک و ضد تایم‌اوت)
 
 import os
 import re
@@ -10,7 +10,6 @@ import uuid
 import shutil
 import tempfile
 import threading
-import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urljoin, urlparse
@@ -22,18 +21,19 @@ from bs4 import BeautifulSoup
 from requests.utils import requote_uri
 from telebot import types
 
-# ───────────────────────── تنظیمات ─────────────────────────
+# ───────────────────────── تنظیمات حیاتی ─────────────────────────
 TOKEN = '9102489747:AAHVNVKCpSX_FJj596oWrT0uaobwRzM6pwo'
 
 ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
 PROXY_URL = os.environ.get("PROXY_URL", "").strip() or None
 YT_COOKIES = os.environ.get("YT_COOKIES", "").strip()
 
-MAX_DURATION = 180 * 60       
+MAX_DURATION = 180 * 60       # پشتیبانی کامل از فیلم‌ها و سریال‌های طولانی
 MAX_FILE_MB = 48              
 MAX_PARALLEL_DL = 4           
 SEARCH_TIMEOUT = 15           
 
+# بیش از ۱۰ منبع معتبر ایرانی و بین‌المللی
 SITES = [
     {"name": "UpMusics", "base": "https://upmusics.com"},
     {"name": "MusicDel", "base": "https://musicdel.ir"},
@@ -58,12 +58,12 @@ def log(*a):
     print(*a, flush=True)
 
 
-# ───────────────────────── وب‌سرور زنده‌نگه‌دار ─────────────────────────
+# ───────────────────────── وب‌سرور زنده‌نگه‌دار (Render Health Check) ─────────────────────────
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is alive!")
+        self.wfile.write(b"Bot is alive and running!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -307,8 +307,8 @@ def download_media(url, workdir, video=False, quality=192):
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=8)
 DL_SEM = threading.Semaphore(MAX_PARALLEL_DL)
 
-# ───────────────────────── سیستم کش کاملاً پایدار روی دیسک ─────────────────────────
-CACHE_DIR = os.path.join(tempfile.gettempdir(), "bot_persistent_cache")
+# ───────────────────────── سیستم کش پایدار روی دیسک (ضد انقضا و ضد ری‌استارت) ─────────────────────────
+CACHE_DIR = os.path.join(tempfile.gettempdir(), "bot_revolutionary_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_LOCK = threading.Lock()
 
@@ -375,7 +375,10 @@ def on_start(m):
 def set_mode(c):
     mode = c.data.split(":")[1]
     USER_MODE[c.from_user.id] = mode
-    bot.answer_callback_query(c.id, f"حالت روی {'آهنگ و مداحی' if mode=='audio' else 'فیلم و سریال'} تنظیم شد.")
+    try:
+        bot.answer_callback_query(c.id, f"حالت روی {'آهنگ و مداحی' if mode=='audio' else 'فیلم و سریال'} تنظیم شد.")
+    except Exception:
+        pass
     mode_text = "🎵 آهنگ یا مداحی" if mode == 'audio' else "🎬 فیلم یا سریال"
     bot.edit_message_text(
         f"شما بخش <b>{mode_text}</b> را انتخاب کردید.\n\nاکنون نام خواننده، مداح یا فیلم مورد نظرتان را بفرستید:",
@@ -411,6 +414,10 @@ def on_text(m):
 
 @bot.callback_query_handler(func=lambda c: c.data == "reset_menu")
 def reset_menu_cb(c):
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("🎵 آهنگ / مداحی", callback_data="mode:audio"),
@@ -428,13 +435,17 @@ def on_callback(c):
         parts = c.data.split(":")
         kind, key = parts[0], parts[1]
         chat_id, msg_id = c.message.chat.id, c.message.message_id
-        d = cache_get(key)
         
-        if not d:
-            bot.answer_callback_query(c.id, "اطلاعات این نتیجه منقضی شده؛ لطفاً مجدد جستجو کنید.", show_alert=True)
-            return
+        # فوراً به تلگرام پاسخ می‌دهیم تا خطای تایم‌اوت و انقضا رخ ندهد
+        try:
+            bot.answer_callback_query(c.id, "درخواست شما دریافت شد...")
+        except Exception:
+            pass
             
-        bot.answer_callback_query(c.id)
+        d = cache_get(key)
+        if not d:
+            safe_edit("⚠️ اطلاعات این درخواست منقضی شده یا ربات ری‌استارت شده است. لطفاً عبارت خود را مجدداً جستجو کنید.", chat_id, msg_id)
+            return
         
         if kind == "sel":
             idx = int(parts[2])
@@ -460,6 +471,7 @@ def on_callback(c):
             for i, r in enumerate(results):
                 icon = "▶️" if r["src"] == "YouTube" else "🎵"
                 kb.add(types.InlineKeyboardButton(f"{icon} {r['title'][:45]} ({r['src']})", callback_data=f"sel:{key}:{i}"))
+            kb.add(types.InlineKeyboardButton("🔄 تغییر دسته‌بندی (آهنگ / فیلم)", callback_data="reset_menu"))
             safe_edit(f"نتایج جستجو — یکی را انتخاب کنید:", chat_id, msg_id, kb)
             
         elif kind == "dl":
@@ -471,21 +483,30 @@ def on_callback(c):
             
             safe_edit(f"⏳ در حال آماده‌سازی و ارسال مستقیم فایل... لطفاً شکیبا باشید.", chat_id, msg_id)
             
-            workdir = tempfile.mkdtemp(prefix="bot_dl_")
-            try:
-                with DL_SEM:
-                    path, info = download_media(res["url"], workdir, video=is_video, quality=quality_val)
-                
-                send_media_file(chat_id, path, info.get("title") or res["title"],
-                                info.get("uploader") or info.get("channel"), video=is_video)
-                bot.delete_message(chat_id, msg_id)
-            except Exception as e:
-                log("Download error:", e)
-                kb = types.InlineKeyboardMarkup()
-                kb.add(types.InlineKeyboardButton("🔗 باز کردن لینک منبع", url=res["url"]))
-                safe_edit("❌ متأسفانه دریافت مستقیم این فایل با محدودیت مواجه شد. از لینک زیر استفاده کنید:", chat_id, msg_id, kb)
-            finally:
-                shutil.rmtree(workdir, ignore_errors=True)
+            # اجرای دانلود در ترد پس‌زمینه برای جلوگیری از انسداد ربات
+            def background_download():
+                workdir = tempfile.mkdtemp(prefix="bot_dl_")
+                try:
+                    with DL_SEM:
+                        path, info = download_media(res["url"], workdir, video=is_video, quality=quality_val)
+                    
+                    send_media_file(chat_id, path, info.get("title") or res["title"],
+                                    info.get("uploader") or info.get("channel"), video=is_video)
+                    try:
+                        bot.delete_message(chat_id, msg_id)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log("Download error:", e)
+                    kb = types.InlineKeyboardMarkup()
+                    kb.add(types.InlineKeyboardButton("🔗 باز کردن لینک منبع", url=res["url"]))
+                    safe_edit("❌ متأسفانه دریافت مستقیم این فایل با محدودیت مواجه شد. از لینک زیر استفاده کنید:", chat_id, msg_id, kb)
+                finally:
+                    shutil.rmtree(workdir, ignore_errors=True)
+
+        # اگر درخواست دانلود بود، آن را به پس‌زمینه می‌سپاریم
+            if kind == "dl":
+                threading.Thread(target=background_download, daemon=True).start()
                 
     except Exception as e:
         log("callback exception:", e)
