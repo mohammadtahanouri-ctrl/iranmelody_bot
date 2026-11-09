@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# 🤖 ربات تلگرام چندمنظوره دانلود آهنگ، مداحی و فیلم/سریال
+
 import os
 import re
 import sys
@@ -27,12 +29,12 @@ ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
 PROXY_URL = os.environ.get("PROXY_URL", "").strip() or None
 YT_COOKIES = os.environ.get("YT_COOKIES", "").strip()
 
-MAX_DURATION = 180 * 60       # پشتیبانی کامل از فیلم‌ها و سریال‌های طولانی
+MAX_DURATION = 180 * 60       
 MAX_FILE_MB = 48              
 MAX_PARALLEL_DL = 4           
 SEARCH_TIMEOUT = 15           
 
-# بیش از ۱۰ منبع معتبر ایرانی و بین‌المللی برای پوشش صد درصدی آهنگ‌ها، مداحی‌ها و فیلم‌ها
+# بیش از ۱۰ منبع معتبر ایرانی و بین‌المللی
 SITES = [
     {"name": "UpMusics", "base": "https://upmusics.com"},
     {"name": "MusicDel", "base": "https://musicdel.ir"},
@@ -106,9 +108,7 @@ FFMPEG_DIR = setup_ffmpeg()
 COOKIE_SRC = os.path.join(tempfile.gettempdir(), "yt_cookies_src.txt")
 if YT_COOKIES:
     with open(COOKIE_SRC, "w", encoding="utf-8") as f:
-        f.write(YT_COOKIES.replace("\n", "
-") + "
-")
+        f.write(YT_COOKIES.replace("\\n", "\n") + "\n")
 
 
 def cookie_copy(workdir):
@@ -159,7 +159,6 @@ def build_opts(workdir, clients=None, download=True, video=False, quality=192):
         if FFMPEG_DIR:
             o["ffmpeg_location"] = FFMPEG_DIR
             if not video:
-                # تنظیم بیت‌ریت بر اساس درخواست کیفیت 128 یا 320
                 bitrate = "128" if str(quality) == "128" else "192"
                 o["postprocessors"] = [{
                     "key": "FFmpegExtractAudio",
@@ -233,8 +232,6 @@ def search_site(site, q):
 
 
 def search_media(q, mode="audio"):
-    # صوتی: حداقل 3 تا 5 لینک یوتیوب + بقیه منابع
-    # تصویری/فیلم: حداقل 5 تا 6 لینک یوتیوب + سایر منابع
     yt_count = 6 if mode == "video" else 5
     yt_results = search_ydl("ytsearch", "YouTube", q, yt_count)
     
@@ -262,7 +259,6 @@ def search_media(q, mode="audio"):
                 if item not in merged:
                     merged.append(item)
     else:
-        # برای ویدیو/فیلم هم امکان جستجوی تکمیلی در ساندکلاود یا پلتفرم‌های دیگر یا سایت‌های مرجع فیلم
         jobs = [(s["name"], (lambda s=s: search_site(s, q))) for s in SITES[:4]]
         ex = ThreadPoolExecutor(max_workers=len(jobs))
         futs = {ex.submit(fn): name for name, fn in jobs}
@@ -436,7 +432,6 @@ def on_callback(c):
             
             kb = types.InlineKeyboardMarkup()
             if mode == "audio":
-                # دکمه‌های کیفیت ۱۲۸ و ۳۲۰ برای صوتی
                 kb.row(
                     types.InlineKeyboardButton("📥 کیفیت 128 kbps (صوتی)", callback_data=f"dl:128:{key}:{idx}"),
                     types.InlineKeyboardButton("🔥 کیفیت 320 kbps (صوتی)", callback_data=f"dl:320:{key}:{idx}")
