@@ -22,7 +22,7 @@ def run_web_server():
 threading.Thread(target=run_web_server, daemon=True).start()
 # -------------------------------------------------------------
 
-TOKEN = '9102489747:AAEPaO9IXZ-17-sWGYq80PFFIHvsjHeL_rI'
+TOKEN = '9102489747:AAHVNVKCpSX_FJj596oWrT0uaobwRzM6pwo'
 bot = telebot.TeleBot(TOKEN)
 
 @bot.message_handler(commands=['start', 'help'])
