@@ -1,27 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-ربات دانلود آهنگ، مداحی، فیلم و سریال  (نسخه ۲ — بدون وابستگی به حافظه‌ی سرور)
+ربات دانلود آهنگ، مداحی، فیلم و سریال  (نسخه ۳)
 
-چرا خطای «منقضی شده» دیگر نمی‌آید؟
-  هر دکمه خودش همه‌ی اطلاعات لازم را در callback_data دارد (آیدی یوتیوب، لینک پست تلگرام، ...)،
-  و برای بقیه‌ی منابع عبارت جستجو داخل متن خود پیام نگه داشته می‌شود. پس حتی اگر Render ربات را
-  ری‌استارت کند یا دو نسخه هم‌زمان اجرا شوند، دکمه‌ها کار می‌کنند.
-
-منابع آهنگ و مداحی : سایت‌های فارسی (لینک مستقیم 128/320) + یوتیوب + ساندکلاود + تلگرام
-منابع فیلم و سریال  : یوتیوب + تلگرام (+ سایت‌های فیلم اگر در FILM_SITES بگذارید)
+تفاوت‌های مهم نسخه ۳:
+  • منابع فیلم و سریال اضافه شد (چند سایت ایرانی + movieland.af) و صفحه‌بندی لینک‌ها برای سریال‌ها
+  • نام و آدرس سایت‌ها هیچ‌جا به کاربر نشان داده نمی‌شود؛ کاربر فقط عنوان و دکمه‌ی دانلود می‌بیند
+  • دکمه‌های دانلود از آدرس خودِ ربات (/go/...) رد می‌شوند و بعد کاربر به فایل منتقل می‌شود
+    (توکن امضا‌شده و منقضی‌شونده؛ نیازی به دیتابیس ندارد)
+  • بدون وابستگی به حافظه‌ی سرور: ری‌استارت یا دو نسخه‌ی هم‌زمان مشکلی ایجاد نمی‌کند
+  • دستور ادمین /sites برای تست سلامت همه‌ی سایت‌ها، /probe برای تست یوتیوب، /status
 
 متغیرهای محیطی (Render > Environment)، همه اختیاری هستند:
-  BOT_TOKEN    توکن ربات (اگر نگذارید همین توکن داخل کد استفاده می‌شود)
-  ADMIN_ID     آیدی عددی شما؛ خطاها برایتان ارسال می‌شود + دستورهای /status و /probe
-  YT_COOKIES   متن cookies.txt یک اکانت گوگل جدا (مهم‌ترین راه‌حل بلاک شدن IP سرور در یوتیوب)
-  PROXY_URL    پروکسی برای یوتیوب، مثل http://user:pass@host:port
-  POT_BASE_URL آدرس سرور bgutil (PO Token) اگر راه‌اندازی کردید
-  TG_API_ID, TG_API_HASH, TG_SESSION   جستجوی سراسری تلگرام (با make_session.py بسازید)
-  TG_CHANNELS  کانال‌های عمومی برای جستجوی بدون اکانت، جدا شده با کاما: chan1,chan2
-  FILM_SITES   سایت‌های وردپرسی فیلم، جدا شده با کاما: https://site1.com,https://site2.com
+  BOT_TOKEN     توکن ربات (اگر نگذارید همین توکن داخل کد استفاده می‌شود)
+  ADMIN_ID      آیدی عددی شما؛ خطاها برایتان ارسال می‌شود + دستورهای /status /probe /sites
+  PUBLIC_URL    آدرس سرویس Render شما (اگر نگذارید RENDER_EXTERNAL_URL خودکار استفاده می‌شود)
+  LINK_TTL_HOURS مدت اعتبار لینک‌های دانلود (پیش‌فرض ۲۴ ساعت)
+  YT_COOKIES    متن cookies.txt یک اکانت گوگل جدا (برای بلاک شدن IP سرور در یوتیوب)
+  PROXY_URL     پروکسی برای یوتیوب، مثل http://user:pass@host:port
+  POT_BASE_URL  آدرس سرور bgutil (PO Token)
+  TG_API_ID, TG_API_HASH, TG_SESSION   جستجوی سراسری تلگرام (با make_session.py)
+  TG_CHANNELS   کانال‌های عمومی برای جستجوی بدون اکانت: chan1,chan2
+  FILM_SITES    سایت‌های اضافه‌ی فیلم، جدا شده با کاما. برای سایت‌های بدون جستجوی وردپرسی
+                (مثل سایت‌های جاوااسکریپتی) آخر آدرس |ddg بگذارید:
+                https://site1.com,https://site2.com|ddg
+  MUSIC_SITES_EXTRA  سایت‌های اضافه‌ی موزیک (همان قالب)
 """
 import asyncio
+import base64
 import hashlib
+import hmac
 import html
 import os
 import platform
@@ -35,8 +42,8 @@ import time
 import zipfile
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urljoin, urlparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 import telebot
@@ -56,12 +63,16 @@ TG_API_ID = os.environ.get("TG_API_ID", "").strip()
 TG_API_HASH = os.environ.get("TG_API_HASH", "").strip()
 TG_SESSION = os.environ.get("TG_SESSION", "").strip()
 TG_CHANNELS = [c.strip().lstrip("@") for c in os.environ.get("TG_CHANNELS", "").split(",") if c.strip()]
+PUBLIC_URL = (os.environ.get("PUBLIC_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+LINK_TTL = int(os.environ.get("LINK_TTL_HOURS", "24") or 24) * 3600
+LINK_KEY = hashlib.sha256((os.environ.get("LINK_SECRET") or TOKEN).encode() + b"|go").digest()
 
 MAX_FILE_MB = 48           # سقف آپلود ربات‌های تلگرام ≈ 50MB
 MAX_PARALLEL_DL = 3
-SEARCH_TIMEOUT = 18
-MAX_RESULTS = 10
+SEARCH_TIMEOUT = 20
 MAX_DURATION = {"a": 45 * 60, "v": 6 * 3600}
+SITE_QUOTA = {"a": 6, "v": 7}     # حداکثر نتیجه از مجموع سایت‌ها
+LINKS_PER_PAGE = 6
 
 MUSIC_SITES = [
     {"name": "UpMusics", "base": "https://upmusics.com"},
@@ -75,11 +86,38 @@ MUSIC_SITES = [
     {"name": "MelodyFa", "base": "https://melodyfa.com"},
     {"name": "PopMusic", "base": "https://pop-music.ir"},
 ]
-FILM_SITES = []
-for _u in os.environ.get("FILM_SITES", "").split(","):
-    _u = _u.strip().rstrip("/")
-    if _u.startswith("http"):
-        FILM_SITES.append({"name": urlparse(_u).netloc.replace("www.", ""), "base": _u})
+
+# سایت‌های فیلم و سریال (نام‌ها فقط برای ادمین است و هرگز به کاربر نشان داده نمی‌شود)
+FILM_SITES = [
+    {"name": "moviesho.com", "base": "https://www.moviesho.com"},
+    {"name": "doostihaa.com", "base": "https://www.doostihaa.com"},
+    {"name": "hexdl.com", "base": "https://hexdl.com"},
+    {"name": "vipofilm.com", "base": "https://vipofilm.com"},
+    {"name": "dlrozaneh.ir", "base": "https://dlrozaneh.ir"},
+    # سایت جاوااسکریپتی: جستجو از طریق موتور جستجو + استخراج لینک از کد صفحه
+    {"name": "movieland.af", "base": "https://movieland.af", "search": "ddg",
+     "path_re": r"^/(movies|series)/[^/]+/?$", "strip": ["مووی لند", "Movieland", "movieland"]},
+]
+
+
+def _parse_extra_sites(env_name):
+    out = []
+    for item in os.environ.get(env_name, "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        url, _, flag = item.partition("|")
+        url = url.strip().rstrip("/")
+        if url.startswith("http"):
+            site = {"name": urlparse(url).netloc.replace("www.", ""), "base": url}
+            if flag.strip().lower() == "ddg":
+                site["search"] = "ddg"
+            out.append(site)
+    return out
+
+
+FILM_SITES += _parse_extra_sites("FILM_SITES")
+MUSIC_SITES += _parse_extra_sites("MUSIC_SITES_EXTRA")
 
 # ترتیب تلاش برای یوتیوب: اول پیش‌فرض yt-dlp، بعد کلاینت‌های جایگزین
 YT_ATTEMPTS = [None, ["tv"], ["web_embedded"], ["mweb"], ["android_vr"], ["ios"]]
@@ -111,16 +149,86 @@ def trunc(s, n):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-# ───────────────────────── وب‌سرور زنده‌نگه‌دار ─────────────────────────
+# ───────────────────────── لینک‌های امضاشده‌ی /go/ ─────────────────────────
+class LinkExpired(Exception):
+    pass
+
+
+def _keystream(nonce, n):
+    out, ctr = b"", 0
+    while len(out) < n:
+        out += hashlib.blake2b(nonce + ctr.to_bytes(4, "big"), key=LINK_KEY, digest_size=64).digest()
+        ctr += 1
+    return out[:n]
+
+
+def make_token(url, ttl=None):
+    exp = int(time.time()) + (ttl or LINK_TTL)
+    data = exp.to_bytes(5, "big") + url.encode()
+    nonce = os.urandom(8)
+    ct = bytes(a ^ b for a, b in zip(data, _keystream(nonce, len(data))))
+    tag = hmac.new(LINK_KEY, nonce + ct, hashlib.sha256).digest()[:10]
+    return base64.urlsafe_b64encode(nonce + ct + tag).decode().rstrip("=")
+
+
+def read_token(tok):
+    raw = base64.urlsafe_b64decode(tok + "=" * (-len(tok) % 4))
+    nonce, ct, tag = raw[:8], raw[8:-10], raw[-10:]
+    good = hmac.new(LINK_KEY, nonce + ct, hashlib.sha256).digest()[:10]
+    if not hmac.compare_digest(tag, good):
+        raise ValueError("bad token")
+    data = bytes(a ^ b for a, b in zip(ct, _keystream(nonce, len(ct))))
+    if int.from_bytes(data[:5], "big") < time.time():
+        raise LinkExpired()
+    return data[5:].decode()
+
+
+def wrap_url(url):
+    """آدرس نمایش‌داده‌شده به کاربر: از سرور خودِ ربات رد می‌شود تا نام سایت مبدأ داخل تلگرام دیده نشود."""
+    if not PUBLIC_URL:
+        return url
+    try:
+        return f"{PUBLIC_URL}/go/{make_token(url)}"
+    except Exception:
+        return url
+
+
+# ───────────────────────── وب‌سرور (زنده‌نگه‌دار + /go/) ─────────────────────────
 class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
+    def _page(self, code, text):
+        body = ("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,"
+                "initial-scale=1'><body dir='rtl' style='font-family:sans-serif;text-align:center;"
+                f"padding:48px 16px'>{text}</body>").encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b"Bot is alive!")
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _route(self):
+        if self.path.startswith("/go/"):
+            tok = self.path[4:].split("?")[0].split("#")[0]
+            try:
+                url = read_token(tok)
+            except LinkExpired:
+                return self._page(410, "این لینک منقضی شده است.<br>دوباره از داخل ربات دریافتش کنید.")
+            except Exception:
+                return self._page(404, "لینک نامعتبر است.")
+            self.send_response(302)
+            self.send_header("Location", url)
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self._page(200, "Bot is alive!")
+
+    def do_GET(self):
+        self._route()
 
     def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
+        self._route()
 
     def log_message(self, *args):
         pass
@@ -128,12 +236,12 @@ class SimpleHandler(BaseHTTPRequestHandler):
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
-    HTTPServer(("0.0.0.0", port), SimpleHandler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", port), SimpleHandler).serve_forever()
 
 
 def self_ping():
     """Render رایگان بعد از ۱۵ دقیقه بی‌ترافیکی می‌خوابد؛ هر ۸ دقیقه خودمان را صدا می‌زنیم."""
-    url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    url = PUBLIC_URL
     if not url:
         return
     while True:
@@ -408,13 +516,16 @@ def search_telegram(q, mode):
 # ───────────────────────── جستجو ─────────────────────────
 def clean_title(t):
     t = re.sub(r"\s+", " ", t or "").strip()
-    return re.sub(r"^دانلود\s+", "", t)
+    c = re.sub(r"^دانلود\s+(فیلم|سریال|انیمیشن|انیمه|مستند|آهنگ|مداحی|موزیک|آلبوم)?\s*", "", t)
+    return c if len(c) >= 3 else t
 
 
-SKIP_PATH = ("/category/", "/tag/", "/page/", "/author/", "/feed", "/wp-", "/tags", "/cat/")
+SKIP_PATH = ("/category/", "/tag/", "/page/", "/author/", "/feed", "/wp-", "/tags", "/cat/",
+             "/genre", "/country", "/year/", "/actor", "/director", "/login", "/register")
 
 
-def search_site(site, q, mode):
+def search_site_wp(site, q, mode):
+    """جستجوی استاندارد وردپرسی: /?s=عبارت"""
     base = site["base"]
     r = HTTP.get(base + "/", params={"s": q}, timeout=7)
     if r.status_code != 200:
@@ -437,6 +548,47 @@ def search_site(site, q, mode):
         if len(out) >= 2:
             break
     return out
+
+
+def search_site_ddg(site, q, mode):
+    """برای سایت‌هایی که جستجوی سمت سرور ندارند: جستجوی site:دامنه در موتور جستجو."""
+    host = urlparse(site["base"]).netloc
+    r = HTTP.get("https://html.duckduckgo.com/html/", params={"q": f"site:{host} {q}"},
+                 headers={"Referer": "https://duckduckgo.com/"}, timeout=8)
+    if r.status_code != 200:
+        return []
+    soup = BeautifulSoup(r.text, "html.parser")
+    pre = re.compile(site.get("path_re", "."))
+    out, seen = [], set()
+    for a in soup.select("a.result__a[href]"):
+        href = a["href"]
+        if "uddg=" in href:
+            href = unquote(parse_qs(urlparse(href).query).get("uddg", [""])[0])
+        elif href.startswith("//"):
+            href = "https:" + href
+        p = urlparse(href)
+        if p.netloc.replace("www.", "") != host.replace("www.", "") or not pre.search(p.path):
+            continue
+        if href in seen:
+            continue
+        title = a.get_text(" ", strip=True)
+        for w in site.get("strip", []):
+            title = title.replace(w, " ")
+        title = clean_title(re.sub(r"^[\s|\-–—:]+|[\s|\-–—:]+$", "", title))
+        if len(title) < 2:
+            continue
+        seen.add(href)
+        out.append({"kind": "site", "src": site["name"], "title": title, "url": href})
+        if len(out) >= 2:
+            break
+    return out
+
+
+def search_site(site, q, mode):
+    if site.get("search") == "ddg":
+        return search_site_ddg(site, q, mode)
+    res = search_site_wp(site, q, mode)
+    return res
 
 
 def search_ydl(prefix, label, q, mode, n=5):
@@ -467,10 +619,13 @@ def search_ydl(prefix, label, q, mode, n=5):
     return out
 
 
+def norm_title(t):
+    return re.sub(r"[\W_]+", "", (t or "").lower())
+
+
 def search_media(q, mode):
-    jobs = []
-    for s in (MUSIC_SITES if mode == "a" else FILM_SITES):
-        jobs.append((s["name"], (lambda s=s: search_site(s, q, mode))))
+    sites = MUSIC_SITES if mode == "a" else FILM_SITES
+    jobs = [(s["name"], (lambda s=s: search_site(s, q, mode))) for s in sites]
     jobs.append(("Telegram", lambda: search_telegram(q, mode)))
     jobs.append(("YouTube", lambda: search_ydl("ytsearch", "YouTube", q, mode, 5 if mode == "a" else 6)))
     if mode == "a":
@@ -487,19 +642,30 @@ def search_media(q, mode):
     except Exception:
         pass
     ex.shutdown(wait=False)
-    # اولویت نمایش: تلگرام، یوتیوب، سایت‌ها، ساندکلاود (دورانی تا همه‌ی منابع نماینده داشته باشند)
-    order = ["Telegram", "YouTube"] + [n for n, _ in jobs if n not in ("Telegram", "YouTube", "SoundCloud")] + ["SoundCloud"]
-    merged = []
-    for rnd in range(3):
-        for name in order:
-            lst = got.get(name, [])
-            if len(lst) > rnd and len(merged) < MAX_RESULTS:
-                merged.append(lst[rnd])
-    return merged
+
+    # سایت‌ها اول (دورانی تا همه‌ی سایت‌ها نماینده داشته باشند)، بعد تلگرام، یوتیوب، ساندکلاود
+    site_res = []
+    for rnd in range(2):
+        for s in sites:
+            lst = got.get(s["name"], [])
+            if len(lst) > rnd:
+                site_res.append(lst[rnd])
+    site_res = site_res[:SITE_QUOTA[mode]]
+    # اگر یک عنوان در چند سایت بود، فقط شماره‌ی نسخه اضافه می‌کنیم (نام سایت نمایش داده نمی‌شود)
+    seen = {}
+    for r in site_res:
+        k = norm_title(r["title"])
+        seen[k] = seen.get(k, 0) + 1
+        if seen[k] > 1:
+            r["title"] = f"{r['title']} (نسخه {seen[k]})"
+    return (site_res + got.get("Telegram", [])[:2] + got.get("YouTube", [])[:3]
+            + got.get("SoundCloud", [])[:1])
 
 
-# ───────────────────────── لینک‌های سایت‌ها ─────────────────────────
-PREVIEW_RE = re.compile(r"preview|sample|demo|snippet|teaser|trailer", re.I)
+# ───────────────────────── استخراج لینک دانلود از صفحه‌ی سایت‌ها ─────────────────────────
+PREVIEW_RE = re.compile(r"preview|sample|demo|snippet|teaser|trailer|promo|intro", re.I)
+RAW_URL_RE = re.compile(r"https?://[^\s\"'<>\\)]+?\.(?:mp4|mkv|avi|mp3|m4a)(?:\?[^\s\"'<>\\)]*)?", re.I)
+SRC_TAG_RE = re.compile(r"WEB[-.\s]?DL|WEB[-.\s]?Rip|Blu[-.\s]?Ray|BRRip|HDRip|HDTV|DVDRip|HDCAM|\bCAM\b", re.I)
 
 
 def quality_of(s, mode):
@@ -508,35 +674,99 @@ def quality_of(s, mode):
     return m.group(1) if m else None
 
 
+def make_label(href, text, ctx, mode):
+    """برچسب خوانا برای هر لینک: کیفیت، دوبله/زیرنویس، شماره‌ی قسمت و ..."""
+    name = unquote(urlparse(href).path.rsplit("/", 1)[-1])
+    s = f"{name} {text} {ctx}"
+    q = quality_of(s, mode)
+    if mode == "a":
+        return f"{q} kbps" if q else "MP3"
+    parts = []
+    if q:
+        parts.append(f"{q}p")
+    m = SRC_TAG_RE.search(s)
+    if m:
+        key = re.sub(r"[-.\s]", "", m.group(0)).lower()
+        parts.append({"webdl": "WEB-DL", "webrip": "WEBRip", "bluray": "BluRay", "brrip": "BRRip",
+                      "hdrip": "HDRip", "hdtv": "HDTV", "dvdrip": "DVDRip", "hdcam": "HDCAM",
+                      "cam": "CAM"}.get(key, key.upper()))
+    if re.search(r"دوبله|dubbed|dubbing|farsi.?dub|[._-]dub[._-]", s, re.I):
+        parts.append("دوبله")
+    elif re.search(r"زیرنویس|softsub|hardsub|subbed|[._-]sub[._-]", s, re.I):
+        parts.append("زیرنویس")
+    se = re.search(r"S(\d{1,2})[\s._-]*E(\d{1,3})", s, re.I)
+    if se:
+        parts.append(f"S{int(se.group(1)):02d}E{int(se.group(2)):02d}")
+    else:
+        ep = re.search(r"(?:قسمت|ep(?:isode)?)[\s._-]*(\d{1,3})", s, re.I)
+        if ep:
+            parts.append(f"قسمت {int(ep.group(1))}")
+    return " · ".join(parts) or "MP4"
+
+
+def _sort_key(l, mode):
+    q = -(int(l["q"]) if l["q"] else 0)
+    if mode == "a":
+        return (0, 0, q)
+    m = re.search(r"S(\d+)E(\d+)", l["label"])
+    if m:
+        return (int(m.group(1)), int(m.group(2)), q)
+    m = re.search(r"قسمت (\d+)", l["label"])
+    return (0, int(m.group(1)) if m else 0, q)
+
+
 def fetch_site_links(page_url, mode):
     ext = re.compile(r"\.(mp3|m4a)(\?|$)" if mode == "a" else r"\.(mp4|mkv|avi)(\?|$)", re.I)
-    qtxt = r"320|128" if mode == "a" else r"1080|720|480|360"
+    qtxt = r"320|128" if mode == "a" else r"2160|1080|720|480|360"
     r = HTTP.get(page_url, timeout=20)
     r.raise_for_status()
+    raw = r.text.replace("\\/", "/")
     soup = BeautifulSoup(r.text, "html.parser")
     links, seen = [], set()
 
-    def add(href, text):
+    def add(href, text, ctx):
         href = requote_uri(urljoin(page_url, href.strip()))
-        if not href.startswith("http") or href in seen or PREVIEW_RE.search(href):
+        if not href.startswith("http") or href in seen or PREVIEW_RE.search(unquote(href)):
             return
         seen.add(href)
-        links.append({"q": quality_of(href + " " + text, mode), "url": href})
+        links.append({"q": quality_of(unquote(href) + " " + text + " " + ctx, mode),
+                      "url": href, "label": make_label(href, text, ctx, mode)})
 
     for a in soup.find_all("a", href=True):
         href, text = a["href"], a.get_text(" ", strip=True)
+        box = a.find_parent(["li", "tr", "p", "div"])
+        ctx = ""
+        if box is not None and len(box.find_all("a")) <= 3:
+            ctx = box.get_text(" ", strip=True)[:160]
         if ext.search(href):
-            add(href, text)
+            add(href, text, ctx)
         elif re.search(qtxt, text) and re.search(r"دانلود|download|کیفیت", text, re.I):
-            add(href, text)
-    links.sort(key=lambda l: -(int(l["q"]) if l["q"] else 0))
-    return links[:6]
+            add(href, text, ctx)
+    # آدرس‌هایی که فقط داخل کد/JSON صفحه هستند (سایت‌های جاوااسکریپتی)
+    for m in RAW_URL_RE.finditer(raw):
+        href = m.group(0)
+        if ext.search(href):
+            add(href, "", "")
+    links.sort(key=lambda l: _sort_key(l, mode))
+    return links[:60]
 
 
-def link_label(l, mode):
-    if not l["q"]:
-        return "MP3" if mode == "a" else "MP4"
-    return f"{l['q']} kbps" if mode == "a" else f"{l['q']}p"
+LINKS_CACHE = OrderedDict()
+LC_LOCK = threading.Lock()
+
+
+def get_links(url, mode):
+    key = (url, mode)
+    with LC_LOCK:
+        ent = LINKS_CACHE.get(key)
+        if ent and time.time() - ent[0] < 900:
+            return ent[1]
+    links = fetch_site_links(url, mode)
+    with LC_LOCK:
+        LINKS_CACHE[key] = (time.time(), links)
+        while len(LINKS_CACHE) > 120:
+            LINKS_CACHE.popitem(last=False)
+    return links
 
 
 def http_download(url, referer, workdir):
@@ -739,8 +969,9 @@ def show_prompt(chat_id, msg_id, mode):
 
 
 def result_label(r, mode):
-    icon = ICON.get(r["src"], "🎵" if mode == "a" else "🎬")
-    return f"{icon} {trunc(r['title'], 44)} · {SRC_FA.get(r['src'], r['src'])}"
+    icon = ICON.get(r["src"]) or ("🎵" if mode == "a" else "🎬")
+    suffix = "" if r["kind"] == "site" else f" · {SRC_FA.get(r['src'], r['src'])}"
+    return f"{icon} {trunc(r['title'], 44)}{suffix}"
 
 
 def do_search(chat_id, msg_id, q, mode):
@@ -761,7 +992,42 @@ def do_search(chat_id, msg_id, q, mode):
     safe_edit(f"🔎 «{esc(q)}»\nنتیجه‌ی مورد نظر را انتخاب کنید:", chat_id, msg_id, kb)
 
 
-def show_item(chat_id, msg_id, mode, ref, q, hint_title):
+def show_site_links(chat_id, msg_id, mode, ref, res, head, page):
+    back = f"r:{mode}"
+    try:
+        links = get_links(res["url"], mode)
+    except Exception as e:
+        log(f"[site:{res['src']}] {str(e)[:160]}")
+        links = []
+    if not links:
+        safe_edit(head + "\n\n❌ لینک مستقیمی پیدا نشد.", chat_id, msg_id, nav_kb(back))
+        return
+    pages = (len(links) + LINKS_PER_PAGE - 1) // LINKS_PER_PAGE
+    page = max(0, min(page, pages - 1))
+    kb = types.InlineKeyboardMarkup()
+    lo, hi = page * LINKS_PER_PAGE, min(len(links), (page + 1) * LINKS_PER_PAGE)
+    for i in range(lo, hi):
+        row = [BTN(f"⬇️ {trunc(links[i]['label'], 40)}", url=wrap_url(links[i]["url"]))]
+        if mode == "a":
+            row.append(BTN("📤 ارسال در چت", callback_data=f"x:{mode}:{ref}:{i}"))
+        kb.row(*row)
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(BTN("◀️ قبلی", callback_data=f"p:{mode}:{page - 1}:{ref}"))
+        nav.append(BTN(f"{page + 1}/{pages}", callback_data="noop"))
+        if page < pages - 1:
+            nav.append(BTN("بعدی ▶️", callback_data=f"p:{mode}:{page + 1}:{ref}"))
+        kb.row(*nav)
+    kb.row(*nav_row(back))
+    text = head + (f"\n\n{len(links)} لینک دانلود" if pages > 1 else "")
+    if not safe_edit(text, chat_id, msg_id, kb):  # اگر تلگرام دکمه‌ها را نپذیرفت، متنی بفرست
+        txt = head + "\n\n" + "\n".join(
+            f"{esc(links[i]['label'])}: {esc(wrap_url(links[i]['url']))}" for i in range(lo, hi))
+        bot.send_message(chat_id, txt, disable_web_page_preview=True)
+
+
+def show_item(chat_id, msg_id, mode, ref, q, hint_title, page=0):
     res = resolve_ref(ref, mode, q, hint_title)
     back = f"r:{mode}"
     if not res:
@@ -769,26 +1035,18 @@ def show_item(chat_id, msg_id, mode, ref, q, hint_title):
                   chat_id, msg_id, nav_kb(back))
         return
     title = res.get("title") or hint_title or "—"
-    head = f"🔎 «{esc(q or '')}»\n{esc(trunc(title, 150))}\nمنبع: {esc(SRC_FA.get(res['src'], res['src']))}"
-    kb = types.InlineKeyboardMarkup()
+    head = f"🔎 «{esc(q or '')}»\n{esc(trunc(title, 150))}"
+    if res["kind"] != "site":
+        head += f"\nمنبع: {esc(SRC_FA.get(res['src'], res['src']))}"
 
     if res["kind"] == "site":
-        safe_edit(WAIT_TEXT[mode], chat_id, msg_id, nav_kb(back))
-        try:
-            links = fetch_site_links(res["url"], mode)
-        except Exception as e:
-            log(f"[site:{res['src']}] {str(e)[:160]}")
-            links = []
-        if not links:
-            safe_edit(head + "\n\n❌ لینک مستقیمی پیدا نشد.", chat_id, msg_id, nav_kb(back))
-            return
-        for i, l in enumerate(links):
-            lab = link_label(l, mode)
-            row = [BTN(f"⬇️ لینک {lab}", url=l["url"])]
-            if mode == "a":
-                row.append(BTN("📤 ارسال در چت", callback_data=f"x:{mode}:{ref}:{i}"))
-            kb.row(*row)
-    elif res["kind"] == "tg":
+        if page == 0:
+            safe_edit(WAIT_TEXT[mode], chat_id, msg_id, nav_kb(back))
+        show_site_links(chat_id, msg_id, mode, ref, res, head, page)
+        return
+
+    kb = types.InlineKeyboardMarkup()
+    if res["kind"] == "tg":
         size = res.get("size") or 0
         if USERBOT.ok and not size:
             try:
@@ -844,6 +1102,11 @@ def fail_kb(mode, url=None):
     return kb
 
 
+def public_src_url(res):
+    """آدرس منبع فقط برای یوتیوب/ساندکلاود/تلگرام نمایش داده می‌شود؛ هرگز برای سایت‌ها."""
+    return None if (not res or res.get("kind") == "site") else res.get("url")
+
+
 def start_download(chat_id, mode, kind, ref, q, title):
     res = resolve_ref(ref, mode, q, title)
     status = bot.send_message(chat_id, "⏳ در حال آماده‌سازی و ارسال فایل ...", reply_markup=nav_kb(f"m:{mode}"))
@@ -873,13 +1136,13 @@ def start_download(chat_id, mode, kind, ref, q, title):
     except NoFile:
         safe_edit("❌ حجم این فایل بیشتر از سقف ۵۰ مگابایتی تلگرام است یا ساخته نشد.\n"
                   "از دکمه‌ی «باز کردن لینک» استفاده کنید.",
-                  chat_id, status.message_id, fail_kb(mode, (res or {}).get("url")))
+                  chat_id, status.message_id, fail_kb(mode, public_src_url(res)))
     except Exception as e:
         log(f"[download] {str(e)[:300]}")
         notify_admin(f"⚠️ دانلود ناموفق\n{(res or {}).get('src')} | {title[:60]}\n{str(e)[:600]}")
         safe_edit("❌ دریافت مستقیم این فایل ممکن نشد. گزینه‌ی دیگری را امتحان کنید "
                   "یا از لینک منبع استفاده کنید.",
-                  chat_id, status.message_id, fail_kb(mode, (res or {}).get("url")))
+                  chat_id, status.message_id, fail_kb(mode, public_src_url(res)))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -889,7 +1152,7 @@ def send_site_link(chat_id, mode, ref, idx, q, title):
     status = bot.send_message(chat_id, "⏳ در حال دریافت فایل ...", reply_markup=nav_kb(f"m:{mode}"))
     workdir = tempfile.mkdtemp(prefix="bot_")
     try:
-        links = fetch_site_links(res["url"], mode)
+        links = get_links(res["url"], mode)
         with DL_SEM:
             path = http_download(links[idx]["url"], res["url"], workdir)
         send_file(chat_id, path, title or res["title"], None, after_file_kb(mode))
@@ -899,7 +1162,7 @@ def send_site_link(chat_id, mode, ref, idx, q, title):
             pass
     except Exception as e:
         log(f"[send-link] {str(e)[:200]}")
-        safe_edit("❌ ارسال در چت نشد؛ از دکمه‌ی «لینک» برای دانلود مستقیم استفاده کنید.",
+        safe_edit("❌ ارسال در چت نشد؛ از دکمه‌ی دانلود مستقیم استفاده کنید.",
                   chat_id, status.message_id, fail_kb(mode))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -925,8 +1188,51 @@ def on_status(m):
         f"deno: {shutil.which('deno') or '❌'}\nnode: {shutil.which('node') or '❌'}\n"
         f"cookies: {'✅' if os.path.exists(COOKIE_SRC) else '—'}\nproxy: {'✅' if PROXY_URL else '—'}\n"
         f"PO-token server: {'✅' if POT_BASE_URL else '—'}\n"
-        f"جستجوی سراسری تلگرام: {'✅' if USERBOT.ok else '—'}\nکانال‌های TG_CHANNELS: {len(TG_CHANNELS)}"),
+        f"آدرس عمومی (/go): {PUBLIC_URL or '❌ تنظیم نشده'}\n"
+        f"جستجوی سراسری تلگرام: {'✅' if USERBOT.ok else '—'}\nکانال‌های TG_CHANNELS: {len(TG_CHANNELS)}\n"
+        f"سایت‌های موزیک: {len(MUSIC_SITES)} | سایت‌های فیلم: {len(FILM_SITES)}"),
         parse_mode=None)
+
+
+def probe_site(site, mode, q):
+    name = site["name"]
+    try:
+        res = search_site(site, q, mode)
+    except Exception as e:
+        err = re.sub(r"\s+", " ", str(e))[:90]
+        return f"❌ {name}: {err}"
+    if not res:
+        return f"⚠️ {name}: جستجو نتیجه‌ای نداشت"
+    try:
+        links = fetch_site_links(res[0]["url"], mode)
+    except Exception as e:
+        return f"⚠️ {name}: {len(res)} نتیجه، خطا در لینک‌ها ({str(e)[:50]})"
+    return f"✅ {name}: {len(res)} نتیجه، {len(links)} لینک" if links else f"⚠️ {name}: {len(res)} نتیجه، ۰ لینک"
+
+
+@bot.message_handler(commands=["sites"])
+def on_sites(m):
+    """/sites film avatar   یا   /sites music ebi — تست سلامت همه‌ی سایت‌ها (فقط ادمین)"""
+    if not is_admin(m):
+        return
+    parts = (m.text or "").split(maxsplit=2)
+    mode = "a" if len(parts) > 1 and parts[1].lower().startswith("m") else "v"
+    q = parts[2] if len(parts) > 2 else ("ebi" if mode == "a" else "avatar")
+    msg = bot.reply_to(m, f"⏳ تست سایت‌ها ({q}) ...", parse_mode=None)
+    sites = MUSIC_SITES if mode == "a" else FILM_SITES
+    ex = ThreadPoolExecutor(max_workers=len(sites))
+    futs = [ex.submit(probe_site, s, mode, q) for s in sites]
+    lines = []
+    for f in futs:
+        try:
+            lines.append(f.result(timeout=45))
+        except Exception:
+            lines.append("⚠️ timeout")
+    ex.shutdown(wait=False)
+    try:
+        bot.edit_message_text(esc("\n".join(lines)), m.chat.id, msg.message_id, parse_mode=None)
+    except Exception:
+        pass
 
 
 @bot.message_handler(commands=["probe"])
@@ -980,6 +1286,8 @@ def on_callback(c):
     try:
         p = (c.data or "").split(":")
         act = p[0]
+        if act == "noop":
+            return
         chat_id, msg_id = c.message.chat.id, c.message.message_id
         uid = c.from_user.id
         if act == "home":
@@ -998,6 +1306,9 @@ def on_callback(c):
                 show_prompt(chat_id, msg_id, mode)
         elif act == "i":  # i:{mode}:{ref}
             show_item(chat_id, msg_id, p[1], ":".join(p[2:]), page_query(c.message), page_title_from_button(c))
+        elif act == "p":  # p:{mode}:{page}:{ref}  (صفحه‌ی بعد/قبل لینک‌ها)
+            show_item(chat_id, msg_id, p[1], ":".join(p[3:]), page_query(c.message),
+                      page_title(c.message), page=int(p[2]))
         elif act == "d":  # d:{mode}:{kind}:{ref}
             start_download(chat_id, p[1], p[2], ":".join(p[3:]),
                            page_query(c.message), page_title(c.message))
