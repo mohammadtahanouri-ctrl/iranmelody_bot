@@ -73,6 +73,8 @@ SEARCH_TIMEOUT = 20
 MAX_DURATION = {"a": 45 * 60, "v": 6 * 3600}
 SITE_QUOTA = {"a": 6, "v": 7}     # حداکثر نتیجه از مجموع سایت‌ها
 LINKS_PER_PAGE = 6
+# نمایش نام سایت منبع کنار هر نتیجه (برای تست سلامت سایت‌ها). برای خاموش کردن: SHOW_SITE_NAMES=0
+SHOW_SITE_NAMES = os.environ.get("SHOW_SITE_NAMES", "1").strip() != "0"
 
 MUSIC_SITES = [
     {"name": "UpMusics", "base": "https://upmusics.com"},
@@ -970,7 +972,10 @@ def show_prompt(chat_id, msg_id, mode):
 
 def result_label(r, mode):
     icon = ICON.get(r["src"]) or ("🎵" if mode == "a" else "🎬")
-    suffix = "" if r["kind"] == "site" else f" · {SRC_FA.get(r['src'], r['src'])}"
+    if r["kind"] == "site":
+        suffix = f" · {r['src']}" if SHOW_SITE_NAMES else ""
+    else:
+        suffix = f" · {SRC_FA.get(r['src'], r['src'])}"
     return f"{icon} {trunc(r['title'], 44)}{suffix}"
 
 
@@ -1038,6 +1043,8 @@ def show_item(chat_id, msg_id, mode, ref, q, hint_title, page=0):
     head = f"🔎 «{esc(q or '')}»\n{esc(trunc(title, 150))}"
     if res["kind"] != "site":
         head += f"\nمنبع: {esc(SRC_FA.get(res['src'], res['src']))}"
+    elif SHOW_SITE_NAMES:
+        head += f"\nمنبع: {esc(res['src'])}"
 
     if res["kind"] == "site":
         if page == 0:
